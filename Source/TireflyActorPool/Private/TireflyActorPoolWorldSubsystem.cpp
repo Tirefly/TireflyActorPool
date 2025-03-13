@@ -176,7 +176,6 @@ AActor* UTireflyActorPoolWorldSubsystem::SpawnActor_Internal(
 				ActorLifetimeTimers.Remove(Actor);
 			});
 		World->GetTimerManager().SetTimer(TimerHandle, TimerDelegate, Lifetime, false);
-
 		ActorLifetimeTimers.Add(Actor, TimerHandle);
 	}
 
@@ -263,6 +262,7 @@ AActor* UTireflyActorPoolWorldSubsystem::ActorPool_FinishSpawningActor_Internal(
 				ActorLifetimeTimers.Remove(Actor);
 			});
 		World->GetTimerManager().SetTimer(TimerHandle, TimerDelegate, Lifetime, false);
+		ActorLifetimeTimers.Add(Actor, TimerHandle);
 	}
 
 	return Actor;
