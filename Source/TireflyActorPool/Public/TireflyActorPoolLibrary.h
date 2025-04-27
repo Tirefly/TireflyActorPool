@@ -16,8 +16,8 @@ class TIREFLYACTORPOOL_API UTireflyActorPoolLibrary : public UBlueprintFunctionL
 
 public:
 
-#pragma region ActorPool_GenericOperation_Actor
-
+#pragma region ActorPool_GenericSpawn_Actor
+	
 	// 从ActorPool生成执行指定Actor类的实例，但不会自动运行其构造脚本及其ActorPool初始化。
 	// Spawns an instance of the specified actor class from ActorPool, but does not automatically run its construction script and its ActorPool initialization.
 	UFUNCTION(BlueprintCallable, Category = "Actor Pool", Meta = (
@@ -45,6 +45,10 @@ public:
 		const FTransform& SpawnTransform,
 		float Lifetime);
 
+#pragma endregion
+	
+
+#pragma region ActorPool_GenericOperation_Actor
 	// Actor通用的从对象池中取出后进行初始化的操作。
 	// Generic operation for an Actor to initialize after being taken out from the object pool.
 	UFUNCTION(BlueprintCallable, Category = "Actor Pool", Meta = (WorldContext = "WorldContext", DefaultToSelf = "Actor"))
