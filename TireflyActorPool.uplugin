@@ -13,23 +13,16 @@
 		{
 			"Name": "TireflyActorPool",
 			"Type": "Runtime",
-			"LoadingPhase": "PreDefault",
-			"PlatformAllowList": [
-				"Win64"
-			]
-		},
-		{
-			"Name": "TireflyActorPoolDeveloper",
-			"Type": "UncookedOnly",
-			"LoadingPhase": "Default",
-			"PlatformAllowList": [
-				"Win64"
-			]
+			"LoadingPhase": "Default"
 		}
 	],
 	"Plugins": [
 		{
 			"Name": "Niagara",
+			"Enabled": true
+		},
+		{
+			"Name": "StructUtils",
 			"Enabled": true
 		}
 	]

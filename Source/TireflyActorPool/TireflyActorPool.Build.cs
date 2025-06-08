@@ -41,6 +41,7 @@ public class TireflyActorPool : ModuleRules
 				"SlateCore",
 				"AIModule",
                 "Niagara",
+                "StructUtils"
 				// ... add private dependencies that you statically link with here ...	
 			}
 			);

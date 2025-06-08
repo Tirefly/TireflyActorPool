@@ -5,6 +5,7 @@
 
 #include "Engine/World.h"
 #include "TimerManager.h"
+#include "TireflyActorPoolLogChannels.h"
 #include "TireflyPoolingActorInterface.h"
 
 
@@ -15,14 +16,17 @@ void UTireflyActorPoolWorldSubsystem::Initialize(FSubsystemCollectionBase& Colle
 
 void UTireflyActorPoolWorldSubsystem::Deinitialize()
 {
-	ActorPool_ClearAllPools();
+	ClearAllActorPools();
 
 	Super::Deinitialize();
 }
 
-void UTireflyActorPoolWorldSubsystem::ActorPool_ClearAllPools()
+void UTireflyActorPoolWorldSubsystem::ClearAllActorPools()
 {
-	for (auto Pool : ActorPoolOfClass)
+	FScopeLock Lock(&PoolLock);
+	
+	// 批量处理Class池
+	for (auto& Pool : ActorPoolOfClass)
 	{
 		for (auto Actor : Pool.Value.ActorPool)
 		{
@@ -33,7 +37,7 @@ void UTireflyActorPoolWorldSubsystem::ActorPool_ClearAllPools()
 		}
 	}
 
-	for (auto Pool : ActorPoolOfID)
+	for (auto Pool : ActorPoolOfId)
 	{
 		for (auto Actor : Pool.Value.ActorPool)
 		{
@@ -45,10 +49,10 @@ void UTireflyActorPoolWorldSubsystem::ActorPool_ClearAllPools()
 	}
 
 	ActorPoolOfClass.Empty();
-	ActorPoolOfID.Empty();
+	ActorPoolOfId.Empty();
 }
 
-void UTireflyActorPoolWorldSubsystem::ActorPool_ClearPoolOfClass(TSubclassOf<AActor> ActorClass)
+void UTireflyActorPoolWorldSubsystem::ClearActorPoolsOfClass(TSubclassOf<AActor> ActorClass)
 {
 	if (FTireflyActorPool* Pool = ActorPoolOfClass.Find(ActorClass))
 	{
@@ -64,9 +68,9 @@ void UTireflyActorPoolWorldSubsystem::ActorPool_ClearPoolOfClass(TSubclassOf<AAc
 	}
 }
 
-void UTireflyActorPoolWorldSubsystem::ActorPool_ClearPoolOfID(FName ActorID)
+void UTireflyActorPoolWorldSubsystem::ClearActorPoolOfId(FName ActorId)
 {
-	if (FTireflyActorPool* Pool = ActorPoolOfID.Find(ActorID))
+	if (FTireflyActorPool* Pool = ActorPoolOfId.Find(ActorId))
 	{
 		for (auto Actor : Pool->ActorPool)
 		{
@@ -76,189 +80,101 @@ void UTireflyActorPoolWorldSubsystem::ActorPool_ClearPoolOfID(FName ActorID)
 			}
 		}
 		Pool->ActorPool.Empty();
-		ActorPoolOfID.Remove(ActorID);
+		ActorPoolOfId.Remove(ActorId);
 	}
 }
 
-AActor* UTireflyActorPoolWorldSubsystem::FetchActor_Internal(
-	const TSubclassOf<AActor>& ActorClass,
-	FName ActorID)
+AActor* UTireflyActorPoolWorldSubsystem::FetchActorFromPool(const TSubclassOf<AActor>& ActorClass, FName ActorId)
 {
-	FTireflyActorPool* Pool = ActorPoolOfID.Find(ActorID);
-	if (!Pool)
+	if (!ActorClass)
 	{
-		Pool = ActorPoolOfClass.Find(ActorClass);
+		UE_LOG(LogTireflyActorPool, Error, TEXT("[%s] Invalid ActorClass"), *FString(__FUNCTION__));
+		return nullptr;
 	}
 
-	if (Pool && Pool->ActorPool.Num() > 0)
+	if (FTireflyActorPool* Pool = (ActorId != NAME_None) ? ActorPoolOfId.Find(ActorId) : ActorPoolOfClass.Find(ActorClass))
 	{
-		AActor* Actor = Pool->ActorPool.Pop();
-
-		return Actor;
+		return Pool->ActorPool.IsEmpty() ? nullptr : Pool->ActorPool.Pop();
 	}
 
 	return nullptr;
 }
 
-AActor* UTireflyActorPoolWorldSubsystem::K2_ActorPool_FetchActor(TSubclassOf<AActor> ActorClass, FName ActorID)
-{
-	return ActorPool_FetchActor<AActor>(ActorClass, ActorID);
-}
-
-TArray<AActor*> UTireflyActorPoolWorldSubsystem::K2_ActorPool_FetchActors(TSubclassOf<AActor> ActorClass, FName ActorID,
-                                                                           int32 Count)
-{
-	return ActorPool_FetchActors<AActor>(ActorClass, ActorID, Count);
-}
-
 AActor* UTireflyActorPoolWorldSubsystem::SpawnActor_Internal(
-	const UObject* WorldContext,
 	const TSubclassOf<AActor>& ActorClass,
-	FName ActorID,
+	FName ActorId,
 	const FTransform& Transform,
+	const FInstancedStruct* InitialData,
 	float Lifetime,
 	const ESpawnActorCollisionHandlingMethod CollisionHandling,
 	AActor* Owner,
 	APawn* Instigator)
 {
-	UWorld* World = GEngine->GetWorldFromContextObject(WorldContext, EGetWorldErrorMode::LogAndReturnNull);
-	if (!IsValid(World) || (!IsValid(ActorClass) && ActorID == NAME_None))
+	UWorld* World = GetWorld();
+	if (!IsValid(World))
 	{
+		UE_LOG(LogTireflyActorPool, Error, TEXT("[%s] Invalid World"), *FString(__FUNCTION__));
 		return nullptr;
 	}
 
-	AActor* Actor = ActorPool_FetchActor<AActor>(ActorClass, ActorID);
+	if (!IsValid(ActorClass))
+	{
+		UE_LOG(LogTireflyActorPool, Error, TEXT("[%s] Invalid ActorClass"), *FString(__FUNCTION__));
+		return nullptr;
+	}
+
+	if (!ActorClass->ImplementsInterface(UTireflyPoolingActorInterface::StaticClass()))
+	{
+		UE_LOG(LogTireflyActorPool, Error, TEXT("[%s] ActorClass %s does not implement UTireflyPoolingActorInterface"),
+			*FString(__FUNCTION__),
+			*ActorClass->GetName());
+		return nullptr;
+	}
+
+	FScopeLock Lock(&PoolLock);
+
+	AActor* Actor = FetchActorFromPool(ActorClass, ActorId);
 	if (Actor)
 	{
 		Actor->SetActorTransform(Transform, false, nullptr, ETeleportType::ResetPhysics);
 		Actor->SetInstigator(Instigator);
 		Actor->SetOwner(Owner);
-		
-		if (Actor->Implements<UTireflyPoolingActorInterface>())
-		{
-			if (ITireflyPoolingActorInterface::Execute_PoolingGetActorID(Actor) != ActorID && ActorID != NAME_None)
-			{
-				ITireflyPoolingActorInterface::Execute_PoolingSetActorID(Actor, ActorID);
-			}
-			ITireflyPoolingActorInterface::Execute_PoolingBeginPlay(Actor);
-		}
 	}
 	else
 	{
-		if (!IsValid(ActorClass))
-		{
-			return nullptr;
-		}
-
 		FActorSpawnParameters SpawnParameters;
 		SpawnParameters.Owner = Owner;
 		SpawnParameters.Instigator = Instigator;
 		SpawnParameters.SpawnCollisionHandlingOverride = CollisionHandling;
 
 		Actor = World->SpawnActor<AActor>(ActorClass, Transform, SpawnParameters);
-		if (Actor->Implements<UTireflyPoolingActorInterface>())
+		if (!IsValid(Actor))
 		{
-			if (ActorID != NAME_None)
-			{
-				ITireflyPoolingActorInterface::Execute_PoolingSetActorID(Actor, ActorID);
-			}
-			ITireflyPoolingActorInterface::Execute_PoolingBeginPlay(Actor);
+			UE_LOG(LogTireflyActorPool, Error, TEXT("[%s] Failed to spawn ActorClass %s"),
+				*FString(__FUNCTION__),
+				*ActorClass->GetName());
+			return nullptr;
+		}
+
+		if (ActorId != NAME_None)
+		{
+			ITireflyPoolingActorInterface::Execute_PoolingSetActorId(Actor, ActorId);
 		}
 	}
 
-	if (IsValid(Actor) && Lifetime > 0.f)
+	ITireflyPoolingActorInterface::Execute_PoolingBeginPlay(Actor);
+	if (InitialData)
 	{
-		FTimerHandle TimerHandle;
-		FTimerDelegate TimerDelegate = FTimerDelegate::CreateLambda(
-			[this, Actor]
-			{
-				ActorPool_ReleaseActor(Actor);
-				ActorLifetimeTimers.Remove(Actor);
-			});
-		World->GetTimerManager().SetTimer(TimerHandle, TimerDelegate, Lifetime, false);
-		ActorLifetimeTimers.Add(Actor, TimerHandle);
-	}
-
-	return Actor;
-}
-
-AActor* UTireflyActorPoolWorldSubsystem::ActorPool_BeginDeferredActorSpawn_Internal(
-	const UObject* WorldContext,
-	TSubclassOf<AActor> ActorClass,
-	FName ActorID,
-	const FTransform& SpawnTransform,
-	ESpawnActorCollisionHandlingMethod CollisionHandling,
-	AActor* Owner,
-	APawn* Instigator)
-{
-	UWorld* World = GEngine->GetWorldFromContextObject(WorldContext, EGetWorldErrorMode::LogAndReturnNull);
-	if (!IsValid(World) || (!IsValid(ActorClass) && ActorID == NAME_None))
-	{
-		return nullptr;
-	}
-
-	auto SetActorID = [ActorID](AActor* InActor)
-	{
-		if (InActor->Implements<UTireflyPoolingActorInterface>())
-		{
-			if (ITireflyPoolingActorInterface::Execute_PoolingGetActorID(InActor) != ActorID && ActorID != NAME_None)
-			{
-				ITireflyPoolingActorInterface::Execute_PoolingSetActorID(InActor, ActorID);
-			}
-		}
-	};
-
-	AActor* Actor = ActorPool_FetchActor<AActor>(ActorClass, ActorID);
-	if (Actor)
-	{
-		SetActorID(Actor);
-		Actor->SetActorTransform(SpawnTransform, true, nullptr, ETeleportType::ResetPhysics);
-		Actor->SetInstigator(Instigator);
-		Actor->SetOwner(Owner);
-
-		return Actor;
-	}
-
-	if (!IsValid(ActorClass))
-	{
-		return nullptr;
-	}
-
-	Actor = World->SpawnActorDeferred<AActor>(ActorClass, SpawnTransform, Owner, Instigator, CollisionHandling);
-	SetActorID(Actor);
-
-	return Actor;
-}
-
-AActor* UTireflyActorPoolWorldSubsystem::ActorPool_FinishSpawningActor_Internal(
-	const UObject* WorldContext,
-	AActor* Actor,
-	const FTransform& SpawnTransform,
-	float Lifetime)
-{
-	UWorld* World = WorldContext->GetWorld();
-	if (!IsValid(World) || !IsValid(Actor))
-	{
-		return nullptr;
-	}
-
-	if ((!Actor->IsActorInitialized()))
-	{
-		Actor->FinishSpawning(SpawnTransform);
-	}
-
-	if (Actor->Implements<UTireflyPoolingActorInterface>())
-	{
-		ITireflyPoolingActorInterface::Execute_PoolingBeginPlay(Actor);
+		ITireflyPoolingActorInterface::Execute_PoolingInitialized(Actor, *InitialData);
 	}
 
 	if (Lifetime > 0.f)
-	{
+	{		
 		FTimerHandle TimerHandle;
 		FTimerDelegate TimerDelegate = FTimerDelegate::CreateLambda(
 			[this, Actor]
 			{
-				ActorPool_ReleaseActor(Actor);
+				RecycleActorToPool(Actor);
 				ActorLifetimeTimers.Remove(Actor);
 			});
 		World->GetTimerManager().SetTimer(TimerHandle, TimerDelegate, Lifetime, false);
@@ -268,23 +184,26 @@ AActor* UTireflyActorPoolWorldSubsystem::ActorPool_FinishSpawningActor_Internal(
 	return Actor;
 }
 
-void UTireflyActorPoolWorldSubsystem::ActorPool_ReleaseActor(AActor* Actor)
+void UTireflyActorPoolWorldSubsystem::RecycleActorToPool(AActor* Actor)
 {
 	if (!IsValid(Actor))
 	{
+		UE_LOG(LogTireflyActorPool, Warning, TEXT("[%s] Invalid Actor"), *FString(__FUNCTION__));
 		return;
 	}
 
-	FName ActorID = NAME_None;
+	FScopeLock Lock(&PoolLock);
+	
+	FName ActorId = NAME_None;
 	if (Actor->Implements<UTireflyPoolingActorInterface>())
 	{
-		ActorID = ITireflyPoolingActorInterface::Execute_PoolingGetActorID(Actor);
+		ActorId = ITireflyPoolingActorInterface::Execute_PoolingGetActorId(Actor);
 		ITireflyPoolingActorInterface::Execute_PoolingEndPlay(Actor);
 	}
 
-	if (ActorID != NAME_None)
+	if (ActorId != NAME_None)
 	{
-		FTireflyActorPool& Pool = ActorPoolOfID.FindOrAdd(ActorID);
+		FTireflyActorPool& Pool = ActorPoolOfId.FindOrAdd(ActorId);
 		Pool.ActorPool.Push(Actor);
 
 		return;
@@ -294,41 +213,68 @@ void UTireflyActorPoolWorldSubsystem::ActorPool_ReleaseActor(AActor* Actor)
 	Pool.ActorPool.Push(Actor);	
 }
 
-void UTireflyActorPoolWorldSubsystem::ActorPool_WarmUp(const UObject* WorldContextObject,
-	TSubclassOf<AActor> ActorClass, FName ActorID, const FTransform& Transform, AActor* Owner, APawn* Instigator,
+void UTireflyActorPoolWorldSubsystem::WarmUpActorPool(
+	TSubclassOf<AActor> ActorClass,
+	FName ActorId,
 	int32 Count)
 {
-	UWorld* World = WorldContextObject->GetWorld();
-
-	if (!IsValid(World) || !IsValid(ActorClass) || ActorID == NAME_None || Count <= 0)
+	if (!IsValid(ActorClass))
 	{
+		UE_LOG(LogTireflyActorPool, Warning, TEXT("[%s] Invalid ActorClass"), *FString(__FUNCTION__));
 		return;
 	}
 
+	if (!ActorClass->ImplementsInterface(UTireflyPoolingActorInterface::StaticClass()))
+	{
+		UE_LOG(LogTireflyActorPool, Warning, TEXT("[%s] ActorClass %s does not implement UTireflyPoolingActorInterface"),
+			*FString(__FUNCTION__),
+			*ActorClass->GetName());
+		return;
+	}
+
+	if (Count <= 0)
+	{
+		UE_LOG(LogTireflyActorPool, Warning, TEXT("[%s] Count must be greater than 0"), *FString(__FUNCTION__));
+		return;
+	}
+	
+	UWorld* World = GetWorld();
+	if (!IsValid(World))
+	{
+		UE_LOG(LogTireflyActorPool, Error, TEXT("[%s] Invalid World"), *FString(__FUNCTION__));
+		return;
+	}
+
+	FScopeLock Lock(&PoolLock);
+
 	FActorSpawnParameters SpawnParameters;
-	SpawnParameters.Owner = Owner;
-	SpawnParameters.Instigator = Instigator;
 	SpawnParameters.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
-	FTireflyActorPool& Pool = ActorID != NAME_None ? ActorPoolOfID.FindOrAdd(ActorID) : ActorPoolOfClass.FindOrAdd(ActorClass);
-	Pool.ActorPool.Reserve(Count);
+	FTireflyActorPool& Pool = ActorId != NAME_None ? ActorPoolOfId.FindOrAdd(ActorId) : ActorPoolOfClass.FindOrAdd(ActorClass);
+	Pool.ActorPool.Reserve(Pool.ActorPool.Num() + Count);
+	
 	for (int32 i = 0; i < Count; i++)
 	{
-		AActor* Actor = World->SpawnActor<AActor>(ActorClass, Transform, SpawnParameters);
-		if (Actor->Implements<UTireflyPoolingActorInterface>())
+		AActor* Actor = World->SpawnActor<AActor>(ActorClass, FTransform::Identity, SpawnParameters);
+		if (!IsValid(Actor))
 		{
-			if (ActorID != NAME_None)
-			{
-				ITireflyPoolingActorInterface::Execute_PoolingSetActorID(Actor, ActorID);
-			}
-			ITireflyPoolingActorInterface::Execute_PoolingWarmUp(Actor);
+			UE_LOG(LogTireflyActorPool, Error, TEXT("[%s] Failed to spawn ActorClass %s"),
+				*FString(__FUNCTION__),
+				*ActorClass->GetName());
+			continue;
 		}
+		
+		if (ActorId != NAME_None)
+		{
+			ITireflyPoolingActorInterface::Execute_PoolingSetActorId(Actor, ActorId);
+		}
+		ITireflyPoolingActorInterface::Execute_PoolingWarmUp(Actor);
 
 		Pool.ActorPool.Push(Actor);
 	}
 }
 
-TArray<TSubclassOf<AActor>> UTireflyActorPoolWorldSubsystem::ActorPool_DebugActorClasses() const
+TArray<TSubclassOf<AActor>> UTireflyActorPoolWorldSubsystem::Debug_GetAllActorPoolClasses() const
 {
 	TArray<TSubclassOf<AActor>> ActorClasses;
 	ActorPoolOfClass.GetKeys(ActorClasses);
@@ -336,15 +282,15 @@ TArray<TSubclassOf<AActor>> UTireflyActorPoolWorldSubsystem::ActorPool_DebugActo
 	return ActorClasses;
 }
 
-TArray<FName> UTireflyActorPoolWorldSubsystem::ActorPool_DebugActorIDs() const
+TArray<FName> UTireflyActorPoolWorldSubsystem::Debug_GetAllActorPoolIds() const
 {
-	TArray<FName> ActorIDs;
-	ActorPoolOfID.GetKeys(ActorIDs);
+	TArray<FName> ActorIds;
+	ActorPoolOfId.GetKeys(ActorIds);
 
-	return ActorIDs;
+	return ActorIds;
 }
 
-int32 UTireflyActorPoolWorldSubsystem::ActorPool_DebugActorNumberOfClass(TSubclassOf<AActor> ActorClass)
+int32 UTireflyActorPoolWorldSubsystem::Debug_GetActorNumberOfClassPool(const TSubclassOf<AActor>& ActorClass) const
 {
 	if (!ActorPoolOfClass.Contains(ActorClass))
 	{
@@ -354,12 +300,12 @@ int32 UTireflyActorPoolWorldSubsystem::ActorPool_DebugActorNumberOfClass(TSubcla
 	return ActorPoolOfClass[ActorClass].ActorPool.Num();
 }
 
-int32 UTireflyActorPoolWorldSubsystem::ActorPool_DebugActorNumberOfID(FName ActorID)
+int32 UTireflyActorPoolWorldSubsystem::Debug_GetActorNumberOfIdPool(FName ActorId) const
 {
-	if (!ActorPoolOfID.Contains(ActorID))
+	if (!ActorPoolOfId.Contains(ActorId))
 	{
 		return -1;
 	}
 
-	return ActorPoolOfID[ActorID].ActorPool.Num();
+	return ActorPoolOfId[ActorId].ActorPool.Num();
 }
